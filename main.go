@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/api/types/volume"
 	"os"
 	"strconv"
 	"strings"
@@ -16,6 +17,7 @@ import (
 
 type ComposeService struct {
 	Image           string              `yaml:"image,omitempty"`
+	ContainerName   string              `yaml:"container_name,omitempty"`
 	Ports           []string            `yaml:"ports,omitempty"`
 	Volumes         []string            `yaml:"volumes,omitempty"`
 	Environment     map[string]string   `yaml:"environment,omitempty"`
@@ -50,15 +52,42 @@ type ComposeHealthcheck struct {
 	StartPeriod time.Duration `yaml:"start_period,omitempty"`
 }
 
+type ComposeVolume struct {
+	External bool   `yaml:"external,omitempty"`
+	Name     string `yaml:"name,omitempty"`
+}
+
 type ComposeFile struct {
-	Version  string                    `yaml:"version"`
 	Services map[string]ComposeService `yaml:"services"`
+	Volumes  map[string]ComposeVolume  `yaml:"volumes,omitempty"`
 }
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Println("Usage: docker-compose-gen <container_id> [output_file]")
+	ctx := context.Background()
+	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error creating Docker client: %v\n", err)
 		os.Exit(1)
+	}
+	defer cli.Close()
+
+	if len(os.Args) < 2 {
+		// List all containers
+		containers, err := cli.ContainerList(ctx, container.ListOptions{All: true})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error listing containers: %v\n", err)
+			os.Exit(1)
+		}
+
+		fmt.Println("CONTAINER ID\tNAMES")
+		for _, container := range containers {
+			names := make([]string, len(container.Names))
+			for i, name := range container.Names {
+				names[i] = strings.TrimPrefix(name, "/")
+			}
+			fmt.Printf("%s\t%s\n", container.ID[:12], strings.Join(names, ", "))
+		}
+		return
 	}
 
 	containerID := os.Args[1]
@@ -67,14 +96,6 @@ func main() {
 	if len(os.Args) > 2 {
 		outputFile = os.Args[2]
 	}
-
-	ctx := context.Background()
-	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error creating Docker client: %v\n", err)
-		os.Exit(1)
-	}
-	defer cli.Close()
 
 	containerJSON, err := cli.ContainerInspect(ctx, containerID)
 	if err != nil {
@@ -88,7 +109,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	compose := generateCompose(containerJSON, imageJSON)
+	compose := generateCompose(cli, containerJSON, imageJSON)
 
 	yamlData, err := yaml.Marshal(compose)
 	if err != nil {
@@ -108,16 +129,17 @@ func main() {
 	}
 }
 
-func generateCompose(containerJSON container.InspectResponse, imageJSON image.InspectResponse) ComposeFile {
+func generateCompose(cli *client.Client, containerJSON container.InspectResponse, imageJSON image.InspectResponse) ComposeFile {
 	compose := ComposeFile{
-		Version:  "3.8",
 		Services: make(map[string]ComposeService),
+		Volumes:  make(map[string]ComposeVolume),
 	}
 
 	service := ComposeService{
 		Image:           containerJSON.Config.Image,
 		Ports:           make([]string, 0),
 		Volumes:         make([]string, 0),
+		ContainerName:   containerJSON.Name[1:], // Remove leading '/'
 		Environment:     make(map[string]string),
 		Restart:         string(containerJSON.HostConfig.RestartPolicy.Name),
 		Resources:       make(map[string]string),
@@ -155,8 +177,21 @@ func generateCompose(containerJSON container.InspectResponse, imageJSON image.In
 		}
 	}
 
+	// Volume mapping distinction
 	for _, mount := range containerJSON.Mounts {
-		service.Volumes = append(service.Volumes, fmt.Sprintf("%s:%s", mount.Source, mount.Destination))
+		volumeMapping := mount.Source + ":" + mount.Destination
+		if mount.Type == "volume" {
+			// Docker volume
+			service.Volumes = append(service.Volumes, mount.Name+":"+mount.Destination)
+			volumeInspect, err := cli.VolumeInspect(context.Background(), mount.Name)
+			compose.Volumes[mount.Name] = ComposeVolume{
+				Name:     mount.Name,
+				External: err != nil || !isComposeVolume(volumeInspect),
+			}
+		} else if mount.Type == "bind" {
+			// Local folder
+			service.Volumes = append(service.Volumes, volumeMapping)
+		}
 	}
 
 	containerEnv := parseEnv(containerJSON.Config.Env)
@@ -178,7 +213,7 @@ func generateCompose(containerJSON container.InspectResponse, imageJSON image.In
 
 	// Network filtering
 	for networkName := range containerJSON.NetworkSettings.Networks {
-		if !isComposeNetwork(networkName) {
+		if !isComposeNetwork(networkName) && !isBuiltInNetwork(networkName) {
 			service.Networks = append(service.Networks, networkName)
 		}
 	}
@@ -237,6 +272,19 @@ func healthchecksEqual(a, b *container.HealthConfig) bool {
 		}
 	}
 	return true
+}
+
+func isComposeVolume(volumeInspect volume.Volume) bool {
+	for key := range volumeInspect.Labels {
+		if strings.HasPrefix(key, "com.docker.compose.") {
+			return true
+		}
+	}
+	return false
+}
+
+func isBuiltInNetwork(networkName string) bool {
+	return networkName == "bridge" || networkName == "host" || networkName == "none"
 }
 
 func isComposeNetwork(networkName string) bool {
