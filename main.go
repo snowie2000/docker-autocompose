@@ -103,7 +103,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	imageJSON, err := cli.ImageInspect(ctx, containerJSON.Config.Image)
+	imageJSON, err := cli.ImageInspect(ctx, containerJSON.Image)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error inspecting image %s: %v\n", containerJSON.Config.Image, err)
 		os.Exit(1)
