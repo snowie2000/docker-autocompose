@@ -42,6 +42,9 @@ type ComposeService struct {
 	StopSignal      string              `yaml:"stop_signal,omitempty"`
 	StopTimeout     *int                `yaml:"stop_timeout,omitempty"`
 	Shell           []string            `yaml:"shell,omitempty"`
+	Dns             []string            `yaml:"dns,omitempty"`
+	DnsSearch       []string            `yaml:"dns_search,omitempty"`
+	DnsOptions      []string            `yaml:"dns_opt,omitempty"`
 }
 
 type ComposeHealthcheck struct {
@@ -140,6 +143,9 @@ func generateCompose(cli *client.Client, containerJSON container.InspectResponse
 		Ports:           make([]string, 0),
 		Volumes:         make([]string, 0),
 		ContainerName:   containerJSON.Name[1:], // Remove leading '/'
+		Dns:             containerJSON.HostConfig.DNS,
+		DnsSearch:       containerJSON.HostConfig.DNSSearch,
+		DnsOptions:      containerJSON.HostConfig.DNSOptions,
 		Environment:     make(map[string]string),
 		Restart:         string(containerJSON.HostConfig.RestartPolicy.Name),
 		Resources:       make(map[string]string),
